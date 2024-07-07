@@ -1,5 +1,6 @@
 from collections import defaultdict, deque
 import random
+import math
 from typing import Optional, Tuple, Union, cast
 from risk_helper.game import Game
 from risk_shared.models.card_model import CardModel
@@ -141,7 +142,7 @@ def handle_redeem_cards(game: Game, bot_state: BotState, query: QueryRedeemCards
         card_sets.append(card_set)
         cards_remaining = [card for card in cards_remaining if card not in card_set]
 
-    # Remember we can't redeem any more than the required number of card sets if 
+    # Remember we can't redeem any more than the required number of card sets if
     # we have just eliminated a player.
     if game.state.card_sets_redeemed > 12 and query.cause == "turn_started":
         card_set = game.state.get_card_set(cards_remaining)
@@ -166,28 +167,25 @@ def handle_distribute_troops(game: Game, bot_state: BotState, query: QueryDistri
         game.state.get_territories_owned_by(game.state.me.player_id)
     )
 
-    # We need to remember we have to place our matching territory bonus
-    # if we have one.
     if len(game.state.me.must_place_territory_bonus) != 0:
         assert total_troops >= 2
         distributions[game.state.me.must_place_territory_bonus[0]] += 2
         total_troops -= 2
 
+    troops_per_territory = total_troops // len(border_territories)
+    leftover_troops = total_troops % len(border_territories)
+
+    for territory in border_territories:
+        distributions[territory] += troops_per_territory
+
+    # Get the territory with the lowest number of troops
     my_territories = game.state.get_territories_owned_by(game.state.me.player_id)
-    weakest_players = sorted(game.state.players.values(), key=lambda x: sum(
-        [game.state.territories[y].troops for y in game.state.get_territories_owned_by(x.player_id)]
-    ))
+    weakest_territory = min(
+        my_territories, key=lambda x: game.state.territories[x].troops
+    )
 
-    for player in weakest_players:
-        bordering_enemy_territories = set(game.state.get_all_adjacent_territories(my_territories)) & set(game.state.get_territories_owned_by(player.player_id))
-        if len(bordering_enemy_territories) > 0:
-            print("my territories", [game.state.map.get_vertex_name(x) for x in my_territories])
-            print("bordering enemies", [game.state.map.get_vertex_name(x) for x in bordering_enemy_territories])
-            print("adjacent to target", [game.state.map.get_vertex_name(x) for x in game.state.map.get_adjacent_to(list(bordering_enemy_territories)[0])])
-            selected_territory = list(set(game.state.map.get_adjacent_to(list(bordering_enemy_territories)[0])) & set(my_territories))[0]
-            distributions[selected_territory] += total_troops
-            break
-
+    # Add leftover troops to the weakest territory
+    distributions[weakest_territory] += leftover_troops
 
     return game.move_distribute_troops(query, distributions)
 
@@ -244,16 +242,26 @@ def handle_attack(game: Game, bot_state: BotState, query: QueryAttack) -> Union[
 def handle_troops_after_attack(game: Game, bot_state: BotState, query: QueryTroopsAfterAttack) -> MoveTroopsAfterAttack:
     """After conquering a territory in an attack, you must move troops to the new territory."""
 
-    # First we need to get the record that describes the attack, and then the move that specifies
-    # which territory was the attacking territory.
+    # Get the record that describes the attack, and then the move that specifies which territory was the attacking territory.
     record_attack = cast(RecordAttack, game.state.recording[query.record_attack_id])
     move_attack = cast(MoveAttack, game.state.recording[record_attack.move_attack_id])
 
-    # We will always move the maximum number of troops we can.
-    return game.move_troops_after_attack(
-        query, game.state.territories[move_attack.attacking_territory].troops - 1
+    # Determine the minimum number of troops to move
+    min_troops_to_move = min(move_attack.attacking_troops, game.state.territories[move_attack.attacking_territory].troops - 1)
+
+    # Move half the number of troops from the attacking territory to the defending territory, rounded up
+    move_troops = max(min_troops_to_move, 
+                      min(game.state.territories[move_attack.attacking_territory].troops - 1, 
+                          math.ceil(game.state.territories[move_attack.attacking_territory].troops / 2)))
+
+    print(
+        "Attacking Territory Troops",
+        game.state.territories[move_attack.attacking_territory].troops,
+        "Move Troops",
+        move_troops,
     )
 
+    return game.move_troops_after_attack(query, move_troops)
 
 def handle_defend(game: Game, bot_state: BotState, query: QueryDefend) -> MoveDefend:
     """If you are being attacked by another player, you must choose how many troops to defend with."""
@@ -273,7 +281,7 @@ def handle_defend(game: Game, bot_state: BotState, query: QueryDefend) -> MoveDe
 def handle_fortify(game: Game, bot_state: BotState, query: QueryFortify) -> Union[MoveFortify, MoveFortifyPass]:
     """At the end of your turn, after you have finished attacking, you may move a number of troops between
     any two of your territories (they must be adjacent)."""
-
+    print("Fortifying")
 
     # We will always fortify towards the most powerful player (player with most troops on the map) to defend against them.
     my_territories = game.state.get_territories_owned_by(game.state.me.player_id)
