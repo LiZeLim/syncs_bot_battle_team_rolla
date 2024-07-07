@@ -249,19 +249,24 @@ def handle_troops_after_attack(game: Game, bot_state: BotState, query: QueryTroo
     # Determine the minimum number of troops to move
     min_troops_to_move = min(move_attack.attacking_troops, game.state.territories[move_attack.attacking_territory].troops - 1)
 
-    # Move half the number of troops from the attacking territory to the defending territory, rounded up
-    move_troops = max(min_troops_to_move, 
-                      min(game.state.territories[move_attack.attacking_territory].troops - 1, 
-                          math.ceil(game.state.territories[move_attack.attacking_territory].troops / 2)))
+    if len(game.state.recording) < 2000:
+        # Move half the number of troops from the attacking territory to the defending territory, rounded up
+        move_troops = max(min_troops_to_move, 
+                        min(game.state.territories[move_attack.attacking_territory].troops - 1, 
+                            math.ceil(game.state.territories[move_attack.attacking_territory].troops / 2)))
 
-    print(
-        "Attacking Territory Troops",
-        game.state.territories[move_attack.attacking_territory].troops,
-        "Move Troops",
-        move_troops,
-    )
+        print(
+            "Attacking Territory Troops",
+            game.state.territories[move_attack.attacking_territory].troops,
+            "Move Troops",
+            move_troops,
+        )
 
-    return game.move_troops_after_attack(query, move_troops)
+        return game.move_troops_after_attack(query, move_troops)
+    else:
+        return game.move_troops_after_attack(
+            query, game.state.territories[move_attack.attacking_territory].troops - 1
+        )
 
 def handle_defend(game: Game, bot_state: BotState, query: QueryDefend) -> MoveDefend:
     """If you are being attacked by another player, you must choose how many troops to defend with."""
@@ -271,7 +276,7 @@ def handle_defend(game: Game, bot_state: BotState, query: QueryDefend) -> MoveDe
     # First we need to get the record that describes the attack we are defending against.
     move_attack = cast(MoveAttack, game.state.recording[query.move_attack_id])
     defending_territory = move_attack.defending_territory
-    
+
     # We can only defend with up to 2 troops, and no more than we have stationed on the defending
     # territory.
     defending_troops = min(game.state.territories[defending_territory].troops, 2)
@@ -279,35 +284,42 @@ def handle_defend(game: Game, bot_state: BotState, query: QueryDefend) -> MoveDe
 
 
 def handle_fortify(game: Game, bot_state: BotState, query: QueryFortify) -> Union[MoveFortify, MoveFortifyPass]:
-    """At the end of your turn, after you have finished attacking, you may move a number of troops between
-    any two of your territories (they must be adjacent)."""
-    print("Fortifying")
+    """At the end of your turn, you can fortify your positions by moving troops from one territory to another.
+    This function will move troops from inner territories to border territories."""
 
-    # We will always fortify towards the most powerful player (player with most troops on the map) to defend against them.
     my_territories = game.state.get_territories_owned_by(game.state.me.player_id)
-    total_troops_per_player = {}
-    for player in game.state.players.values():
-        total_troops_per_player[player.player_id] = sum([game.state.territories[x].troops for x in game.state.get_territories_owned_by(player.player_id)])
+    border_territories = game.state.get_all_border_territories(my_territories)
+    inner_territories = set(my_territories) - set(border_territories)
 
-    most_powerful_player = max(total_troops_per_player.items(), key=lambda x: x[1])[0]
-
-    # If we are the most powerful, we will pass.
-    if most_powerful_player == game.state.me.player_id:
+    if not inner_territories:
         return game.move_fortify_pass(query)
-    
-    # Otherwise we will find the shortest path between our territory with the most troops
-    # and any of the most powerful player's territories and fortify along that path.
-    candidate_territories = game.state.get_all_border_territories(my_territories)
-    most_troops_territory = max(candidate_territories, key=lambda x: game.state.territories[x].troops)
 
-    # To find the shortest path, we will use a custom function.
-    shortest_path = find_shortest_path_from_vertex_to_set(game, most_troops_territory, set(game.state.get_territories_owned_by(most_powerful_player)))
-    # We will move our troops along this path (we can only move one step, and we have to leave one troop behind).
-    # We have to check that we can move any troops though, if we can't then we will pass our turn.
-    if len(shortest_path) > 0 and game.state.territories[most_troops_territory].troops > 1:
-        return game.move_fortify(query, shortest_path[0], shortest_path[1], game.state.territories[most_troops_territory].troops - 1)
-    else:
-        return game.move_fortify_pass(query)
+    # Sort border territories by the number of troops (ascending)
+    sorted_border_territories = sorted(
+        border_territories, key=lambda x: game.state.territories[x].troops
+    )
+
+    fortify_moves = []
+
+    for inner_territory in inner_territories:
+        troops_to_move = (
+            game.state.territories[inner_territory].troops - 1
+        )  # Always leave at least 1 troop
+        if troops_to_move > 0:
+            # Find the nearest border territory (or the one with the least troops)
+            for border_territory in sorted_border_territories:
+                if game.state.map.is_adjacent(inner_territory, border_territory):
+                    fortify_moves.append(
+                        (inner_territory, border_territory, troops_to_move)
+                    )
+                    break
+
+    # If we have moves to make, perform the first one (or choose a strategy to pick one)
+    if fortify_moves:
+        from_territory, to_territory, troops = fortify_moves[0]
+        return game.move_fortify(query, from_territory, to_territory, troops)
+
+    return game.move_fortify_pass(query)
 
 
 def find_shortest_path_from_vertex_to_set(game: Game, source: int, target_set: set[int]) -> list[int]:
