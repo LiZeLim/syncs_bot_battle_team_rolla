@@ -150,22 +150,40 @@ def handle_redeem_cards(game: Game, bot_state: BotState, query: QueryRedeemCards
     card_sets: list[Tuple[CardModel, CardModel, CardModel]] = []
     cards_remaining = game.state.me.cards.copy()
 
-    while len(cards_remaining) >= 5:
-        card_set = game.state.get_card_set(cards_remaining)
-        # According to the pigeonhole principle, we should always be able to make a set
-        # of cards if we have at least 5 cards.
-        assert card_set != None
-        card_sets.append(card_set)
-        cards_remaining = [card for card in cards_remaining if card not in card_set]
+    total_troops_per_player = {}
+    for player in game.state.players.values():
+        total_troops_per_player[player.player_id] = sum(
+            [
+                game.state.territories[x].troops
+                for x in game.state.get_territories_owned_by(player.player_id)
+            ]
+        )
+    least_powerful_player = min(total_troops_per_player.items(), key=lambda x: x[1])[0]
 
-    # Remember we can't redeem any more than the required number of card sets if
-    # we have just eliminated a player.
-    if game.state.card_sets_redeemed > 12 and query.cause == "turn_started":
-        card_set = game.state.get_card_set(cards_remaining)
-        while card_set != None:
+    if least_powerful_player == game.state.me.player_id:
+        while len(cards_remaining) > 0:
+            card_set = game.state.get_card_set(cards_remaining)
+            if card_set is None:
+                break
             card_sets.append(card_set)
             cards_remaining = [card for card in cards_remaining if card not in card_set]
+    else:
+        while len(cards_remaining) >= 5:
             card_set = game.state.get_card_set(cards_remaining)
+            # According to the pigeonhole principle, we should always be able to make a set
+            # of cards if we have at least 5 cards.
+            assert card_set != None
+            card_sets.append(card_set)
+            cards_remaining = [card for card in cards_remaining if card not in card_set]
+
+        # Remember we can't redeem any more than the required number of card sets if
+        # we have just eliminated a player.
+        if game.state.card_sets_redeemed > 12 and query.cause == "turn_started":
+            card_set = game.state.get_card_set(cards_remaining)
+            while card_set != None:
+                card_sets.append(card_set)
+                cards_remaining = [card for card in cards_remaining if card not in card_set]
+                card_set = game.state.get_card_set(cards_remaining)
 
     return game.move_redeem_cards(query, [(x[0].card_id, x[1].card_id, x[2].card_id) for x in card_sets])
 
