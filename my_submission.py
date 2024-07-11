@@ -34,12 +34,12 @@ class BotState():
 
 
 def main():
-    
+
     # Get the game object, which will connect you to the engine and
     # track the state of the game.
     game = Game()
     bot_state = BotState()
-   
+
     # Respond to the engine's queries with your moves.
     while True:
 
@@ -72,36 +72,61 @@ def main():
 
                 case QueryFortify() as q:
                     return handle_fortify(game, bot_state, q)
-        
+
         # Send the move to the engine.
         game.send_move(choose_move(query))
 
-
-def handle_claim_territory(game: Game, bot_state: BotState, query: QueryClaimTerritory) -> MoveClaimTerritory:
-    """At the start of the game, you can claim a single unclaimed territory every turn 
+def handle_claim_territory(
+    game: Game, bot_state: BotState, query: QueryClaimTerritory
+) -> MoveClaimTerritory:
+    """At the start of the game, you can claim a single unclaimed territory every turn
     until all the territories have been claimed by players."""
 
     unclaimed_territories = game.state.get_territories_owned_by(None)
     my_territories = game.state.get_territories_owned_by(game.state.me.player_id)
 
-    # We will try to always pick new territories that are next to ones that we own,
-    # or a random one if that isn't possible.
-    adjacent_territories = game.state.get_all_adjacent_territories(my_territories)
+    # Define the territories for Australia and South America
+    australia_territories = {38, 39, 40, 41}
+    south_america_territories = {28, 29, 30, 31}
 
-    # We can only pick from territories that are unclaimed and adjacent to us.
-    available = list(set(unclaimed_territories) & set(adjacent_territories))
-    if len(available) != 0:
+    # Find the unclaimed territories in Australia and South America
+    unclaimed_australia = list(australia_territories & set(unclaimed_territories))
+    unclaimed_south_america = list(
+        south_america_territories & set(unclaimed_territories)
+    )
 
-        # We will pick the one with the most connections to our territories
-        # this should make our territories clustered together a little bit.
-        def count_adjacent_friendly(x: int) -> int:
-            return len(set(my_territories) & set(game.state.map.get_adjacent_to(x)))
+    # Check if we already own any territories in Australia or South America
+    own_australia = list(australia_territories & set(my_territories))
+    own_south_america = list(south_america_territories & set(my_territories))
 
-        selected_territory = sorted(available, key=lambda x: count_adjacent_friendly(x))[0]
-
-    # Or if there are no such territories, we will pick just an unclaimed one with the greatest degree.
+    # Prioritize claiming in Australia first, then South America
+    if unclaimed_australia and not own_south_america:
+        selected_territory = unclaimed_australia[0]
+    elif unclaimed_south_america and not own_australia:
+        selected_territory = unclaimed_south_america[0]
     else:
-        selected_territory = sorted(unclaimed_territories, key=lambda x: len(game.state.map.get_adjacent_to(x)))[0]
+        # We will try to always pick new territories that are next to ones that we own,
+        # or a random one if that isn't possible.
+        adjacent_territories = game.state.get_all_adjacent_territories(my_territories)
+
+        # We can only pick from territories that are unclaimed and adjacent to us.
+        available = list(set(unclaimed_territories) & set(adjacent_territories))
+        if available:
+            # We will pick the one with the most connections to our territories
+            # this should make our territories clustered together a little bit.
+            def count_adjacent_friendly(x: int) -> int:
+                return len(set(my_territories) & set(game.state.map.get_adjacent_to(x)))
+
+            selected_territory = sorted(
+                available, key=lambda x: count_adjacent_friendly(x), reverse=True
+            )[0]
+        else:
+            # Or if there are no such territories, we will pick just an unclaimed one with the greatest degree.
+            selected_territory = sorted(
+                unclaimed_territories,
+                key=lambda x: len(game.state.map.get_adjacent_to(x)),
+                reverse=True,
+            )[0]
 
     return game.move_claim_territory(query, selected_territory)
 
