@@ -34,12 +34,12 @@ class BotState():
 
 
 def main():
-    
+
     # Get the game object, which will connect you to the engine and
     # track the state of the game.
     game = Game()
     bot_state = BotState()
-   
+
     # Respond to the engine's queries with your moves.
     while True:
 
@@ -72,55 +72,96 @@ def main():
 
                 case QueryFortify() as q:
                     return handle_fortify(game, bot_state, q)
-        
+
         # Send the move to the engine.
         game.send_move(choose_move(query))
 
-
-def handle_claim_territory(game: Game, bot_state: BotState, query: QueryClaimTerritory) -> MoveClaimTerritory:
-    """At the start of the game, you can claim a single unclaimed territory every turn 
+def handle_claim_territory(
+    game: Game, bot_state: BotState, query: QueryClaimTerritory
+) -> MoveClaimTerritory:
+    """At the start of the game, you can claim a single unclaimed territory every turn
     until all the territories have been claimed by players."""
 
     unclaimed_territories = game.state.get_territories_owned_by(None)
     my_territories = game.state.get_territories_owned_by(game.state.me.player_id)
 
-    # We will try to always pick new territories that are next to ones that we own,
-    # or a random one if that isn't possible.
-    adjacent_territories = game.state.get_all_adjacent_territories(my_territories)
+    # Define the territories for Australia and South America
+    australia_territories = {38, 39, 40, 41}
+    south_america_territories = {28, 29, 30, 31}
 
-    # We can only pick from territories that are unclaimed and adjacent to us.
-    available = list(set(unclaimed_territories) & set(adjacent_territories))
-    if len(available) != 0:
+    # Find the unclaimed territories in Australia and South America
+    unclaimed_australia = list(australia_territories & set(unclaimed_territories))
+    unclaimed_south_america = list(
+        south_america_territories & set(unclaimed_territories)
+    )
 
-        # We will pick the one with the most connections to our territories
-        # this should make our territories clustered together a little bit.
-        def count_adjacent_friendly(x: int) -> int:
-            return len(set(my_territories) & set(game.state.map.get_adjacent_to(x)))
+    # Check if we already own any territories in Australia or South America
+    own_australia = list(australia_territories & set(my_territories))
+    own_south_america = list(south_america_territories & set(my_territories))
 
-        selected_territory = sorted(available, key=lambda x: count_adjacent_friendly(x))[0]
-    
-    # Or if there are no such territories, we will pick just an unclaimed one with the greatest degree.
+    # Prioritize claiming in Australia first, then South America
+    if unclaimed_australia and not own_south_america:
+        selected_territory = unclaimed_australia[0]
+    elif unclaimed_south_america and not own_australia:
+        selected_territory = unclaimed_south_america[0]
     else:
-        selected_territory = sorted(unclaimed_territories, key=lambda x: len(game.state.map.get_adjacent_to(x)))[0]
+        # We will try to always pick new territories that are next to ones that we own,
+        # or a random one if that isn't possible.
+        adjacent_territories = game.state.get_all_adjacent_territories(my_territories)
+
+        # We can only pick from territories that are unclaimed and adjacent to us.
+        available = list(set(unclaimed_territories) & set(adjacent_territories))
+        if available:
+            # We will pick the one with the most connections to our territories
+            # this should make our territories clustered together a little bit.
+            def count_adjacent_friendly(x: int) -> int:
+                return len(set(my_territories) & set(game.state.map.get_adjacent_to(x)))
+
+            selected_territory = sorted(
+                available, key=lambda x: count_adjacent_friendly(x), reverse=True
+            )[0]
+        else:
+            # Or if there are no such territories, we will pick just an unclaimed one with the greatest degree.
+            selected_territory = sorted(
+                unclaimed_territories,
+                key=lambda x: len(game.state.map.get_adjacent_to(x)),
+                reverse=True,
+            )[0]
 
     return game.move_claim_territory(query, selected_territory)
 
 
-def handle_place_initial_troop(game: Game, bot_state: BotState, query: QueryPlaceInitialTroop) -> MovePlaceInitialTroop:
+def handle_place_initial_troop(
+    game: Game, bot_state: BotState, query: QueryPlaceInitialTroop
+) -> MovePlaceInitialTroop:
     """After all the territories have been claimed, you can place a single troop on one
     of your territories each turn until each player runs out of troops."""
-    
-    # We will place troops along the territories on our border.
+
+    # Get the list of border territories
     border_territories = game.state.get_all_border_territories(
         game.state.get_territories_owned_by(game.state.me.player_id)
     )
 
-    # We will place a troop in the border territory with the least troops currently
-    # on it. This should give us close to an equal distribution.
-    border_territory_models = [game.state.territories[x] for x in border_territories]
-    min_troops_territory = min(border_territory_models, key=lambda x: x.troops)
+    # Function to count the number of enemy territories adjacent to a given territory
+    def count_adjacent_enemies(territory: int) -> int:
+        return sum(
+            1
+            for neighbor in game.state.map.get_adjacent_to(territory)
+            if game.state.territories[neighbor].occupier != game.state.me.player_id
+        )
 
-    return game.move_place_initial_troop(query, min_troops_territory.territory_id)
+    # Sort border territories by the number of adjacent enemies in descending order
+    sorted_border_territories = sorted(
+        border_territories, key=count_adjacent_enemies, reverse=True
+    )
+
+    # Find the most contested border territory to place the troop
+    for territory in sorted_border_territories:
+        if game.state.territories[territory].troops < 5:
+            return game.move_place_initial_troop(query, territory)
+
+    # If all territories have more troops than the threshold, place it at the most contested one
+    return game.move_place_initial_troop(query, sorted_border_territories[0])
 
 
 def handle_redeem_cards(game: Game, bot_state: BotState, query: QueryRedeemCards) -> MoveRedeemCards:
@@ -134,22 +175,40 @@ def handle_redeem_cards(game: Game, bot_state: BotState, query: QueryRedeemCards
     card_sets: list[Tuple[CardModel, CardModel, CardModel]] = []
     cards_remaining = game.state.me.cards.copy()
 
-    while len(cards_remaining) >= 5:
-        card_set = game.state.get_card_set(cards_remaining)
-        # According to the pigeonhole principle, we should always be able to make a set
-        # of cards if we have at least 5 cards.
-        assert card_set != None
-        card_sets.append(card_set)
-        cards_remaining = [card for card in cards_remaining if card not in card_set]
+    total_troops_per_player = {}
+    for player in game.state.players.values():
+        total_troops_per_player[player.player_id] = sum(
+            [
+                game.state.territories[x].troops
+                for x in game.state.get_territories_owned_by(player.player_id)
+            ]
+        )
+    least_powerful_player = min(total_troops_per_player.items(), key=lambda x: x[1])[0]
 
-    # Remember we can't redeem any more than the required number of card sets if
-    # we have just eliminated a player.
-    if game.state.card_sets_redeemed > 12 and query.cause == "turn_started":
-        card_set = game.state.get_card_set(cards_remaining)
-        while card_set != None:
+    if least_powerful_player == game.state.me.player_id:
+        while len(cards_remaining) > 0:
+            card_set = game.state.get_card_set(cards_remaining)
+            if card_set is None:
+                break
             card_sets.append(card_set)
             cards_remaining = [card for card in cards_remaining if card not in card_set]
+    else:
+        while len(cards_remaining) >= 5:
             card_set = game.state.get_card_set(cards_remaining)
+            # According to the pigeonhole principle, we should always be able to make a set
+            # of cards if we have at least 5 cards.
+            assert card_set != None
+            card_sets.append(card_set)
+            cards_remaining = [card for card in cards_remaining if card not in card_set]
+
+        # Remember we can't redeem any more than the required number of card sets if
+        # we have just eliminated a player.
+        if game.state.card_sets_redeemed > 12 and query.cause == "turn_started":
+            card_set = game.state.get_card_set(cards_remaining)
+            while card_set != None:
+                card_sets.append(card_set)
+                cards_remaining = [card for card in cards_remaining if card not in card_set]
+                card_set = game.state.get_card_set(cards_remaining)
 
     return game.move_redeem_cards(query, [(x[0].card_id, x[1].card_id, x[2].card_id) for x in card_sets])
 
@@ -160,32 +219,86 @@ def handle_distribute_troops(game: Game, bot_state: BotState, query: QueryDistri
     your turn or after killing another player.
     """
 
-    # We will distribute troops across our border territories.
     total_troops = game.state.me.troops_remaining
     distributions = defaultdict(lambda: 0)
     border_territories = game.state.get_all_border_territories(
         game.state.get_territories_owned_by(game.state.me.player_id)
     )
 
+    my_territories = game.state.get_territories_owned_by(game.state.me.player_id)
+    total_troops_per_player = {}
+    for player in game.state.players.values():
+        total_troops_per_player[player.player_id] = sum(
+            [
+                game.state.territories[x].troops
+                for x in game.state.get_territories_owned_by(player.player_id)
+            ]
+        )
+
+    most_powerful_player = max(total_troops_per_player.items(), key=lambda x: x[1])[0]
+    least_powerful_player = min(total_troops_per_player.items(), key=lambda x: x[1])[0]
+
+    # Ensure we place the matching territory bonus
     if len(game.state.me.must_place_territory_bonus) != 0:
         assert total_troops >= 2
         distributions[game.state.me.must_place_territory_bonus[0]] += 2
         total_troops -= 2
 
-    troops_per_territory = total_troops // len(border_territories)
-    leftover_troops = total_troops % len(border_territories)
+    # If we are the most powerful
+    if most_powerful_player != game.state.me.player_id:
+        troops_per_territory = total_troops // len(border_territories)
+        leftover_troops = total_troops % len(border_territories)
 
-    for territory in border_territories:
-        distributions[territory] += troops_per_territory
+        for territory in border_territories:
+            distributions[territory] += troops_per_territory
 
-    # Get the territory with the lowest number of troops
-    my_territories = game.state.get_territories_owned_by(game.state.me.player_id)
-    weakest_territory = min(
-        my_territories, key=lambda x: game.state.territories[x].troops
-    )
+            # Get the territory with the lowest number of troops
+            my_territories = game.state.get_territories_owned_by(game.state.me.player_id)
+            # Get the territory with the lowest number of troops
+            my_territories = game.state.get_territories_owned_by(game.state.me.player_id)
+            weakest_territory = max(
+                my_territories, key=lambda x: game.state.territories[x].troops
+            )
 
-    # Add leftover troops to the weakest territory
-    distributions[weakest_territory] += leftover_troops
+        # Add leftover troops to the strongest territory
+        distributions[weakest_territory] += leftover_troops
+    elif least_powerful_player != game.state.me.player_id: #doom stack if we are not the strongest
+        weakest_players = sorted(
+            game.state.players.values(),
+            key=lambda x: sum(
+                [
+                    game.state.territories[y].troops
+                    for y in game.state.get_territories_owned_by(x.player_id)
+                ]
+            ),
+        )
+
+        for player in weakest_players:
+            bordering_enemy_territories = set(
+                game.state.get_all_adjacent_territories(my_territories)
+            ) & set(game.state.get_territories_owned_by(player.player_id))
+            if len(bordering_enemy_territories) > 0:
+                selected_territory = list(
+                    set(
+                        game.state.map.get_adjacent_to(
+                            list(bordering_enemy_territories)[0]
+                        )
+                    )
+                    & set(my_territories)
+                )[0]
+                distributions[selected_territory] += total_troops
+                break
+    else: #if we are the weakest player, then we need to stack on our strongest territory so that we dont die
+        my_territories = game.state.get_territories_owned_by(game.state.me.player_id)
+
+        def count_adjacent_friendly(x: int) -> int:
+            return len(set(border_territories) & set(game.state.map.get_adjacent_to(x)))
+
+        selected_territory = sorted(
+            border_territories, key=lambda x: count_adjacent_friendly(x), reverse=True
+        )[0]
+
+        distributions[selected_territory] += total_troops
 
     return game.move_distribute_troops(query, distributions)
 
@@ -193,23 +306,15 @@ def handle_distribute_troops(game: Game, bot_state: BotState, query: QueryDistri
 def handle_attack(game: Game, bot_state: BotState, query: QueryAttack) -> Union[MoveAttack, MoveAttackPass]:
     """After the troop phase of your turn, you may attack any number of times until you decide to
     stop attacking (by passing). After a successful attack, you may move troops into the conquered
-    territory. If you eliminated a player you will get a move to redeem cards and then distribute troops."""
+    territory. If you eliminated a player you will get a move to redeem cards and then distribute troops.
+    """
 
-    # We will attack someone.
+    # Get a list of your territories and the territories adjacent to them
     my_territories = game.state.get_territories_owned_by(game.state.me.player_id)
     bordering_territories = game.state.get_all_adjacent_territories(my_territories)
 
     def attack_weakest(territories: list[int]) -> Optional[MoveAttack]:
-        # We will attack the weakest territory from the list.
-        territories = sorted(territories, key=lambda x: game.state.territories[x].troops)
-        for candidate_target in territories:
-            candidate_attackers = sorted(list(set(game.state.map.get_adjacent_to(candidate_target)) & set(my_territories)), key=lambda x: game.state.territories[x].troops, reverse=True)
-            for candidate_attacker in candidate_attackers:
-                if game.state.territories[candidate_attacker].troops > 2:
-                    return game.move_attack(query, candidate_attacker, candidate_target, min(3, game.state.territories[candidate_attacker].troops - 1))
-
-    def attack_strongest(territories: list[int]) -> Optional[MoveAttack]:
-        # We will attack the weakest territory from the list.
+        # Attack the weakest territory from the list
         territories = sorted(
             territories, key=lambda x: game.state.territories[x].troops
         )
@@ -220,9 +325,10 @@ def handle_attack(game: Game, bot_state: BotState, query: QueryAttack) -> Union[
                     & set(my_territories)
                 ),
                 key=lambda x: game.state.territories[x].troops,
+                reverse=True,
             )
             for candidate_attacker in candidate_attackers:
-                if game.state.territories[candidate_attacker].troops > 1:
+                if game.state.territories[candidate_attacker].troops > 2:
                     return game.move_attack(
                         query,
                         candidate_attacker,
@@ -230,11 +336,11 @@ def handle_attack(game: Game, bot_state: BotState, query: QueryAttack) -> Union[
                         min(3, game.state.territories[candidate_attacker].troops - 1),
                     )
 
-    strongest_territories = sorted(my_territories, key=lambda x: game.state.territories[x].troops, reverse=True)
-    for territory in strongest_territories:
-        move = attack_weakest(list(set(game.state.map.get_adjacent_to(territory)) - set(my_territories)))
-        if move != None:
-            return move
+    # Find the weakest enemy territory adjacent to any of our territories
+    enemy_territories = list(set(bordering_territories) - set(my_territories))
+    move = attack_weakest(enemy_territories)
+    if move:
+        return move
 
     return game.move_attack_pass(query)
 
@@ -261,8 +367,10 @@ def handle_troops_after_attack(game: Game, bot_state: BotState, query: QueryTroo
             "Move Troops",
             move_troops,
         )
-
-        return game.move_troops_after_attack(query, move_troops)
+        if move_troops >= 2:
+            return game.move_troops_after_attack(query, move_troops)
+        else:
+            return game.move_troops_after_attack(query, 1)
     else:
         return game.move_troops_after_attack(
             query, game.state.territories[move_attack.attacking_territory].troops - 1
@@ -285,19 +393,15 @@ def handle_defend(game: Game, bot_state: BotState, query: QueryDefend) -> MoveDe
 
 def handle_fortify(game: Game, bot_state: BotState, query: QueryFortify) -> Union[MoveFortify, MoveFortifyPass]:
     """At the end of your turn, you can fortify your positions by moving troops from one territory to another.
-    This function will move troops from inner territories to border territories."""
+    This function will move troops from inner territories to border territories, or to other inner territories
+    if they are closer to the border territories."""
 
     my_territories = game.state.get_territories_owned_by(game.state.me.player_id)
-    border_territories = game.state.get_all_border_territories(my_territories)
-    inner_territories = set(my_territories) - set(border_territories)
+    border_territories = set(game.state.get_all_border_territories(my_territories))
+    inner_territories = set(my_territories) - border_territories
 
     if not inner_territories:
         return game.move_fortify_pass(query)
-
-    # Sort border territories by the number of troops (ascending)
-    sorted_border_territories = sorted(
-        border_territories, key=lambda x: game.state.territories[x].troops
-    )
 
     fortify_moves = []
 
@@ -306,13 +410,13 @@ def handle_fortify(game: Game, bot_state: BotState, query: QueryFortify) -> Unio
             game.state.territories[inner_territory].troops - 1
         )  # Always leave at least 1 troop
         if troops_to_move > 0:
-            # Find the nearest border territory (or the one with the least troops)
-            for border_territory in sorted_border_territories:
-                if game.state.map.is_adjacent(inner_territory, border_territory):
-                    fortify_moves.append(
-                        (inner_territory, border_territory, troops_to_move)
-                    )
-                    break
+            # Find the shortest path to a border territory
+            path = find_shortest_path_from_vertex_to_set(
+                game, inner_territory, border_territories
+            )
+            if path:
+                next_step = path[0]
+                fortify_moves.append((inner_territory, next_step, troops_to_move))
 
     # If we have moves to make, perform the first one (or choose a strategy to pick one)
     if fortify_moves:
@@ -325,15 +429,14 @@ def handle_fortify(game: Game, bot_state: BotState, query: QueryFortify) -> Unio
 def find_shortest_path_from_vertex_to_set(game: Game, source: int, target_set: set[int]) -> list[int]:
     """Used in move_fortify()."""
 
-    # We perform a BFS search from our source vertex, stopping at the first member of the target_set we find.
     queue = deque()
     queue.appendleft(source)
 
-    current = queue.pop()
     parent = {}
-    seen = {current: True}
+    seen = {source: True}
 
-    while len(queue) != 0:
+    while queue:
+        current = queue.pop()
         if current in target_set:
             break
 
@@ -343,14 +446,13 @@ def find_shortest_path_from_vertex_to_set(game: Game, source: int, target_set: s
                 parent[neighbour] = current
                 queue.appendleft(neighbour)
 
-        current = queue.pop()
-
     path = []
     while current in parent:
         path.append(current)
         current = parent[current]
 
-    return path[::-1]
+    path.reverse()
+    return path
 
 if __name__ == "__main__":
     main()
