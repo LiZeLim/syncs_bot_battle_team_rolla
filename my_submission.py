@@ -130,17 +130,48 @@ def handle_claim_territory(
 
     return game.move_claim_territory(query, selected_territory)
 
-
 def handle_place_initial_troop(
     game: Game, bot_state: BotState, query: QueryPlaceInitialTroop
 ) -> MovePlaceInitialTroop:
     """After all the territories have been claimed, you can place a single troop on one
     of your territories each turn until each player runs out of troops."""
 
+    australia_region = [40, 41, 38, 39]
+    south_america_region = [30, 31, 29, 28]
+
+    my_territories = game.state.get_territories_owned_by(game.state.me.player_id)
+    unclaimed_territories = game.state.get_territories_owned_by(None)
+
+    # Function to check if a region is fully claimed
+    def is_region_claimed(region):
+        return all(territory in my_territories for territory in region)
+
+    # Prioritize placing troops to secure Australia, then South America
+    def place_troops_for_region(region):
+        for territory in region:
+            if territory in my_territories:
+                # Place troop on territory with the fewest troops
+                if game.state.territories[territory].troops < 5:
+                    return game.move_place_initial_troop(query, territory)
+        # If all territories have more troops than the threshold, place it on the first territory owned by the bot
+        for territory in region:
+            if territory in my_territories:
+                return game.move_place_initial_troop(query, territory)
+
+    # Check if we need to focus on Australia
+    if not is_region_claimed(australia_region):
+        move = place_troops_for_region(australia_region)
+        if move:
+            return move
+
+    # Check if we need to focus on South America
+    if not is_region_claimed(south_america_region):
+        move = place_troops_for_region(south_america_region)
+        if move:
+            return move
+
     # Get the list of border territories
-    border_territories = game.state.get_all_border_territories(
-        game.state.get_territories_owned_by(game.state.me.player_id)
-    )
+    border_territories = game.state.get_all_border_territories(my_territories)
 
     # Function to count the number of enemy territories adjacent to a given territory
     def count_adjacent_enemies(territory: int) -> int:
@@ -244,8 +275,7 @@ def handle_distribute_troops(game: Game, bot_state: BotState, query: QueryDistri
         distributions[game.state.me.must_place_territory_bonus[0]] += 2
         total_troops -= 2
 
-    # If we are the most powerful
-    if most_powerful_player != game.state.me.player_id:
+    def distribute_evenly():
         troops_per_territory = total_troops // len(border_territories)
         leftover_troops = total_troops % len(border_territories)
 
@@ -262,7 +292,8 @@ def handle_distribute_troops(game: Game, bot_state: BotState, query: QueryDistri
 
         # Add leftover troops to the strongest territory
         distributions[weakest_territory] += leftover_troops
-    elif least_powerful_player != game.state.me.player_id: #doom stack if we are not the strongest
+
+    def doom_stack():
         weakest_players = sorted(
             game.state.players.values(),
             key=lambda x: sum(
@@ -288,7 +319,8 @@ def handle_distribute_troops(game: Game, bot_state: BotState, query: QueryDistri
                 )[0]
                 distributions[selected_territory] += total_troops
                 break
-    else: #if we are the weakest player, then we need to stack on our strongest territory so that we dont die
+
+    def survival_stack():
         my_territories = game.state.get_territories_owned_by(game.state.me.player_id)
 
         def count_adjacent_friendly(x: int) -> int:
@@ -300,10 +332,20 @@ def handle_distribute_troops(game: Game, bot_state: BotState, query: QueryDistri
 
         distributions[selected_territory] += total_troops
 
+    # If we are the not strongest player
+    if most_powerful_player == game.state.me.player_id:
+        distribute_evenly()
+    elif least_powerful_player != game.state.me.player_id: #doom stack if we are not the strongest
+        doom_stack()
+    else: #if we are the weakest player, then we need to stack on our strongest territory so that we dont die
+        survival_stack()
+
     return game.move_distribute_troops(query, distributions)
 
 
-def handle_attack(game: Game, bot_state: BotState, query: QueryAttack) -> Union[MoveAttack, MoveAttackPass]:
+def handle_attack(
+    game: Game, bot_state: BotState, query: QueryAttack
+) -> Union[MoveAttack, MoveAttackPass]:
     """After the troop phase of your turn, you may attack any number of times until you decide to
     stop attacking (by passing). After a successful attack, you may move troops into the conquered
     territory. If you eliminated a player you will get a move to redeem cards and then distribute troops.
@@ -313,8 +355,46 @@ def handle_attack(game: Game, bot_state: BotState, query: QueryAttack) -> Union[
     my_territories = game.state.get_territories_owned_by(game.state.me.player_id)
     bordering_territories = game.state.get_all_adjacent_territories(my_territories)
 
+    def find_disconnected_clusters(territories: list[int]) -> list[list[int]]:
+        """Finds clusters of connected territories from the given list."""
+        clusters = []
+        visited = set()
+
+        def dfs(territory, cluster):
+            stack = [territory]
+            while stack:
+                current = stack.pop()
+                if current not in visited:
+                    visited.add(current)
+                    cluster.append(current)
+                    for neighbor in game.state.map.get_adjacent_to(current):
+                        if neighbor in territories and neighbor not in visited:
+                            stack.append(neighbor)
+
+        for territory in territories:
+            if territory not in visited:
+                cluster = []
+                dfs(territory, cluster)
+                clusters.append(cluster)
+
+        return clusters
+
+    def find_intermediate_enemy_territories(clusters: list[list[int]]) -> list[int]:
+        """Finds enemy territories that lie between our clusters."""
+        intermediate_territories = set()
+        for cluster in clusters:
+            for territory in cluster:
+                for neighbor in game.state.map.get_adjacent_to(territory):
+                    if (
+                        neighbor not in my_territories
+                        and game.state.territories[neighbor].occupier
+                        != game.state.me.player_id
+                    ):
+                        intermediate_territories.add(neighbor)
+        return list(intermediate_territories)
+
     def attack_weakest(territories: list[int]) -> Optional[MoveAttack]:
-        # Attack the weakest territory from the list
+        """Attack the weakest territory from the list."""
         territories = sorted(
             territories, key=lambda x: game.state.territories[x].troops
         )
@@ -336,7 +416,19 @@ def handle_attack(game: Game, bot_state: BotState, query: QueryAttack) -> Union[
                         min(3, game.state.territories[candidate_attacker].troops - 1),
                     )
 
-    # Find the weakest enemy territory adjacent to any of our territories
+    # Find disconnected clusters of our territories
+    clusters = find_disconnected_clusters(my_territories)
+
+    # Find enemy territories that are between our clusters
+    intermediate_enemy_territories = find_intermediate_enemy_territories(clusters)
+
+    # Try to attack the weakest intermediate enemy territory
+    if intermediate_enemy_territories:
+        move = attack_weakest(intermediate_enemy_territories)
+        if move:
+            return move
+
+    # If no such territory exists, attack the weakest enemy territory adjacent to any of our territories
     enemy_territories = list(set(bordering_territories) - set(my_territories))
     move = attack_weakest(enemy_territories)
     if move:
